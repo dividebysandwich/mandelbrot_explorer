@@ -3,49 +3,186 @@
 use eframe::egui;
 use egui::epaint::Hsva;
 use egui::{Color32, ColorImage, Pos2, Rect, TextureHandle, Vec2};
-use num_complex::Complex64;
+use std::ops::{Add, Div, Mul, Neg, Sub};
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
 const MAX_ITERATIONS: u32 = 1000;
-const ESCAPE_RADIUS_SQ: f64 = 100.0;
+// Note: ESCAPE_RADIUS_SQ is now a `Double` constant.
+const ESCAPE_RADIUS_SQ: Double = Double { hi: 100.0, lo: 0.0 };
 
-// The main application state.
+// High-Precision Number Implementation (Double-Double Arithmetic)
+// A high-precision number represented by the sum of two f64s.
+#[derive(Clone, Copy, Debug, Default)]
+struct Double {
+    hi: f64, // The most significant part of the number
+    lo: f64, // The error term from the last operation
+}
+
+// A high-precision complex number.
+#[derive(Clone, Copy, Debug, Default)]
+struct ComplexDouble {
+    re: Double,
+    im: Double,
+}
+
+impl Double {
+    // Exact square of a Double
+    fn sqr(self) -> Self {
+        let p1 = self.hi * self.hi;
+        let p2 = self.hi * 2.0 * self.lo;
+        let p3 = self.lo * self.lo;
+        let (s1, e1) = two_sum(p1, p2);
+        let (s2, e2) = two_sum(s1, p3);
+        let e = e1 + e2;
+        let (hi, lo) = quick_two_sum(s2, e);
+        Double { hi, lo }
+    }
+}
+
+impl From<f64> for Double {
+    fn from(n: f64) -> Self {
+        Self { hi: n, lo: 0.0 }
+    }
+}
+
+// Error-free sum of two f64s
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let v = s - a;
+    let e = (a - (s - v)) + (b - v);
+    (s, e)
+}
+
+// A slightly faster version of two_sum when |a| >= |b|
+fn quick_two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let e = b - (s - a);
+    (s, e)
+}
+
+// Error-free product of two f64s
+fn two_prod(a: f64, b: f64) -> (f64, f64) {
+    let p = a * b;
+    let (a_hi, a_lo) = split(a);
+    let (b_hi, b_lo) = split(b);
+    let e = ((a_hi * b_hi - p) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo;
+    (p, e)
+}
+
+// Splits a f64 into two 26-bit halves
+fn split(a: f64) -> (f64, f64) {
+    let t = (27.0_f64.exp2() + 1.0) * a;
+    let a_hi = t - (t - a);
+    let a_lo = a - a_hi;
+    (a_hi, a_lo)
+}
+
+impl Neg for Double {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self {
+            hi: -self.hi,
+            lo: -self.lo,
+        }
+    }
+}
+
+impl Add for Double {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        let (s, e) = two_sum(self.hi, rhs.hi);
+        let (hi, lo) = quick_two_sum(s, e + self.lo + rhs.lo);
+        Double { hi, lo }
+    }
+}
+
+impl Sub for Double {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        self + (-rhs)
+    }
+}
+
+impl Mul for Double {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        let (p, e) = two_prod(self.hi, rhs.hi);
+        let (hi, lo) = quick_two_sum(p, e + self.hi * rhs.lo + self.lo * rhs.hi);
+        Double { hi, lo }
+    }
+}
+
+impl Div for Double {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self {
+        let q1 = self.hi / rhs.hi;
+        let r = self - (rhs * q1.into());
+        let q2 = r.hi / rhs.hi;
+        let (hi, lo) = quick_two_sum(q1, q2);
+        Double { hi, lo }
+    }
+}
+
+impl ComplexDouble {
+    fn new(re: Double, im: Double) -> Self { Self { re, im } }
+    
+    // Square of a ComplexDouble
+    fn sqr(self) -> Self {
+        // (re + im*i)^2 = re^2 - im^2 + 2*re*im*i
+        let re_sq = self.re.sqr();
+        let im_sq = self.im.sqr();
+        let re_im = self.re * self.im;
+        Self {
+            re: re_sq - im_sq,
+            im: re_im + re_im,
+        }
+    }
+    
+    fn norm_sqr(self) -> Double {
+        self.re.sqr() + self.im.sqr()
+    }
+}
+
+impl Add for ComplexDouble {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self { re: self.re + rhs.re, im: self.im + rhs.im }
+    }
+}
+
+
+// The main application state
 struct MandelbrotApp {
     texture: Option<TextureHandle>,
     // The parameters of the view represented by the current texture.
-    texture_center: Complex64,
+    texture_center: ComplexDouble,
     texture_zoom: f64,
-
     // The view we are currently displaying (interpolated).
-    display_center: Complex64,
+    display_center: ComplexDouble,
     display_zoom: f64,
     // The target view the animation is moving towards.
-    target_center: Complex64,
+    target_center: ComplexDouble,
     target_zoom: f64,
-
     // Holds the result from the background thread.
-    new_image_and_params: Arc<Mutex<Option<(ColorImage, Complex64, f64)>>>,
+    new_image_and_params: Arc<Mutex<Option<(ColorImage, ComplexDouble, f64)>>>,
     // Flag to prevent starting multiple calculations.
     is_calculating: bool,
-
     viewport_size: Vec2,
 }
 
 // Parameters passed to the background rendering thread.
 #[derive(Clone)]
 struct CalculationParams {
-    center: Complex64,
+    center: ComplexDouble,
     zoom: f64,
     size: [usize; 2],
-    reference_c: Complex64,
-    reference_orbit: Vec<Complex64>,
 }
 
 impl Default for MandelbrotApp {
     fn default() -> Self {
         let initial_zoom = 4.0;
-        let initial_center = Complex64::new(-0.75, 0.0);
+        let initial_center = ComplexDouble::new((-0.75).into(), 0.0.into());
 
         Self {
             texture: None,
@@ -56,7 +193,7 @@ impl Default for MandelbrotApp {
             target_center: initial_center,
             target_zoom: initial_zoom,
             new_image_and_params: Arc::new(Mutex::new(None)),
-            is_calculating: true, // Start calculating the initial view right away
+            is_calculating: true,
             viewport_size: Vec2::ZERO,
         }
     }
@@ -67,26 +204,12 @@ impl MandelbrotApp {
         Default::default()
     }
 
-    // Kicks off a background thread to render the Mandelbrot set.
+    /// Kicks off a background thread to render the Mandelbrot set.
     fn start_calculation(&mut self) {
         if self.is_calculating {
             return;
         }
         self.is_calculating = true;
-
-        let reference_c = self.target_center;
-        let mut reference_orbit = Vec::new();
-
-        // Pre-compute the reference orbit.
-        let mut z = Complex64::new(0.0, 0.0);
-        for _ in 0..MAX_ITERATIONS {
-            reference_orbit.push(z);
-            z = z * z + reference_c;
-            // Stop if the reference point escapes, creating a stable `MaxRefIteration`.
-            if z.norm_sqr() > ESCAPE_RADIUS_SQ * 100.0 {
-                break;
-            }
-        }
 
         let params = CalculationParams {
             center: self.target_center,
@@ -95,8 +218,6 @@ impl MandelbrotApp {
                 self.viewport_size.x as usize,
                 self.viewport_size.y as usize,
             ],
-            reference_c,
-            reference_orbit,
         };
 
         let new_image_mutex = self.new_image_and_params.clone();
@@ -116,9 +237,9 @@ impl eframe::App for MandelbrotApp {
 
                 // Check if the received image is for the view we are currently interested in.
                 // This prevents an old, slow calculation from overwriting a newer view.
-                let is_relevant = (center.re - self.target_center.re).abs() < 1e-9 &&
-                                  (center.im - self.target_center.im).abs() < 1e-9 &&
-                                  (zoom - self.target_zoom).abs() / self.target_zoom < 1e-6;
+                let is_relevant = (center.re.hi - self.target_center.re.hi).abs() < 1e-15 &&
+                                  (center.im.hi - self.target_center.im.hi).abs() < 1e-15 &&
+                                  (zoom - self.target_zoom).abs() / self.target_zoom < 1e-9;
 
                 if is_relevant {
                     self.texture = Some(ctx.load_texture("mandelbrot", new_image, Default::default()));
@@ -144,36 +265,32 @@ impl eframe::App for MandelbrotApp {
             }
 
             // Animate Display Parameters
-            self.display_center.re = lerp(self.display_center.re, self.target_center.re, 0.2);
-            self.display_center.im = lerp(self.display_center.im, self.target_center.im, 0.2);
+            self.display_center.re.hi = lerp(self.display_center.re.hi, self.target_center.re.hi, 0.2);
+            self.display_center.im.hi = lerp(self.display_center.im.hi, self.target_center.im.hi, 0.2);
             self.display_zoom = lerp(self.display_zoom, self.target_zoom, 0.2);
 
             if let Some(texture) = &self.texture {
                 // Calculate UV Mapping for Animated Zoom
                 let aspect_ratio = self.viewport_size.x / self.viewport_size.y;
-                let tex_view_height = self.texture_zoom / aspect_ratio as f64;
-                let disp_view_height = self.display_zoom / aspect_ratio as f64;
-
-                let u_min = (self.display_center.re - 0.5 * self.display_zoom - (self.texture_center.re - 0.5 * self.texture_zoom)) / self.texture_zoom;
-                let u_max = (self.display_center.re + 0.5 * self.display_zoom - (self.texture_center.re - 0.5 * self.texture_zoom)) / self.texture_zoom;
-                let v_min = (self.display_center.im - 0.5 * disp_view_height - (self.texture_center.im - 0.5 * tex_view_height)) / tex_view_height;
-                let v_max = (self.display_center.im + 0.5 * disp_view_height - (self.texture_center.im - 0.5 * tex_view_height)) / tex_view_height;
+                let u_min = (self.display_center.re.hi - 0.5 * self.display_zoom - (self.texture_center.re.hi - 0.5 * self.texture_zoom)) / self.texture_zoom;
+                let u_max = (self.display_center.re.hi + 0.5 * self.display_zoom - (self.texture_center.re.hi - 0.5 * self.texture_zoom)) / self.texture_zoom;
+                let aspect_ratio_f64 = aspect_ratio as f64;
+                let v_min = (self.display_center.im.hi - 0.5 * self.display_zoom / aspect_ratio_f64 - (self.texture_center.im.hi - 0.5 * self.texture_zoom / aspect_ratio_f64)) / (self.texture_zoom / aspect_ratio_f64);
+                let v_max = (self.display_center.im.hi + 0.5 * self.display_zoom / aspect_ratio_f64 - (self.texture_center.im.hi - 0.5 * self.texture_zoom / aspect_ratio_f64)) / (self.texture_zoom / aspect_ratio_f64);
 
                 let uv = Rect::from_min_max(Pos2::new(u_min as f32, v_min as f32), Pos2::new(u_max as f32, v_max as f32));
                 
-                let image_widget = egui::Image::new(&*texture)
-                    .uv(uv)
-                    .fit_to_exact_size(panel_rect.size());
+                let image_widget = egui::Image::new(&*texture).uv(uv).fit_to_exact_size(panel_rect.size());
                 let response = ui.add(image_widget);
                 let response = ui.interact(response.rect, ui.id().with("mandelbrot_interactive_area"), egui::Sense::click_and_drag());
 
                 if response.dragged() {
                     let delta = response.drag_delta();
                     let complex_delta_re = (delta.x as f64 / self.viewport_size.x as f64) * self.display_zoom;
-                    let complex_delta_im = (delta.y as f64 / self.viewport_size.y as f64) * disp_view_height;
-                    self.target_center.re -= complex_delta_re;
-                    self.target_center.im -= complex_delta_im;
-                    self.display_center = self.target_center; // Snap display for immediate feedback
+                    let complex_delta_im = (delta.y as f64 / self.viewport_size.y as f64) * (self.display_zoom / aspect_ratio as f64);
+                    self.target_center.re = self.target_center.re - complex_delta_re.into();
+                    self.target_center.im = self.target_center.im - complex_delta_im.into();
+                    self.display_center = self.target_center;
                     self.start_calculation();
                 }
 
@@ -182,16 +299,16 @@ impl eframe::App for MandelbrotApp {
                     if scroll.y != 0.0 {
                         let zoom_factor = (scroll.y as f64 * 0.001).exp();
                         if let Some(hover_pos) = response.hover_pos() {
-                            // The calculation must be based on the stable target, not the animating display values.
-                            // This makes the zoom deterministic and centers it on the cursor.
-                            let complex_pos = screen_to_complex(hover_pos, self.target_center, self.target_zoom, panel_rect);
-                            self.target_center = complex_pos + (self.target_center - complex_pos) / zoom_factor;
+                            let complex_pos = screen_to_complex_double(hover_pos, self.target_center, self.target_zoom, panel_rect);
+                            let center_diff_re = self.target_center.re - complex_pos.re;
+                            let center_diff_im = self.target_center.im - complex_pos.im;
+                            self.target_center.re = complex_pos.re + center_diff_re * (1.0 / zoom_factor).into();
+                            self.target_center.im = complex_pos.im + center_diff_im * (1.0 / zoom_factor).into();
                         }
                         self.target_zoom /= zoom_factor;
                         self.start_calculation();
                     }
                 }
-
             } else {
                 // Show a loading indicator if there's no texture yet
                 ui.centered_and_justified(|ui| ui.spinner());
@@ -200,9 +317,9 @@ impl eframe::App for MandelbrotApp {
             
             // After interaction, check if a new calculation is needed
             // This is a fallback for cases where an old calculation result was discarded.
-            let target_is_stale = (self.target_center.re - self.texture_center.re).abs() > 1e-9 ||
-                                  (self.target_center.im - self.texture_center.im).abs() > 1e-9 ||
-                                  (self.target_zoom - self.texture_zoom).abs() / self.target_zoom > 1e-6;
+            let target_is_stale = (self.target_center.re.hi - self.texture_center.re.hi).abs() > 1e-15 ||
+                                  (self.target_center.im.hi - self.texture_center.im.hi).abs() > 1e-15 ||
+                                  (self.target_zoom - self.texture_zoom).abs() / self.target_zoom > 1e-9;
 
             if !self.is_calculating && target_is_stale {
                 self.start_calculation();
@@ -220,113 +337,75 @@ impl eframe::App for MandelbrotApp {
             ui.label(" - Pan: Click & Drag");
             ui.separator();
             ui.label("Current View:");
-            ui.monospace(format!("Center Re: {:.12}", self.target_center.re));
-            ui.monospace(format!("Center Im: {:.12}", self.target_center.im));
+            ui.monospace(format!("Center Re: {:.16}", self.target_center.re.hi));
+            ui.monospace(format!("Center Im: {:.16}", self.target_center.im.hi));
             ui.monospace(format!("Zoom: {:.2e}", self.target_zoom));
             ui.separator();
             ui.label(format!("Max Iterations: {}", MAX_ITERATIONS));
              if ui.button("Reset View").clicked() {
-                let initial_center = Complex64::new(-0.75, 0.0);
+                let initial_center = ComplexDouble::new((-0.75).into(), 0.0.into());
                 let initial_zoom = 4.0;
                 self.target_center = initial_center;
                 self.target_zoom = initial_zoom;
                 self.display_center = initial_center;
                 self.display_zoom = initial_zoom;
-                self.is_calculating = false; // Allow new calc to start
+                self.is_calculating = false;
                 self.start_calculation();
             }
         });
     }
 }
 
-// Renders the Mandelbrot set to a new ColorImage. Can be run in a background thread.
+/// Renders the Mandelbrot set to a new ColorImage using high-precision math.
 fn render_mandelbrot_to_new_image(params: CalculationParams) -> ColorImage {
-    let mut image = ColorImage::new(params.size, vec![Color32::TRANSPARENT; params.size[0] * params.size[1]]);
+    let mut image = ColorImage::new(
+        params.size,
+        vec![Color32::BLACK; params.size[0] * params.size[1]],
+    );
     let aspect_ratio = params.size[0] as f64 / params.size[1] as f64;
-    let view_height = params.zoom / aspect_ratio;
-    let use_perturbation = params.zoom < 1e-5;
+    let zoom_dd: Double = params.zoom.into();
+    let view_height_dd: Double = zoom_dd * (1.0 / aspect_ratio).into();
 
     image.pixels.par_iter_mut().enumerate().for_each(|(i, pixel)| {
         let x = i % params.size[0];
         let y = i / params.size[0];
 
-        let n = if use_perturbation {
-            let offset_re = (x as f64 / params.size[0] as f64 - 0.5) * params.zoom;
-            let offset_im = (y as f64 / params.size[1] as f64 - 0.5) * view_height;
-            let delta = Complex64::new(offset_re, offset_im);
-            let c = params.reference_c + delta;
-            calculate_iterations_perturbed(&delta, &params.reference_orbit, c)
-        } else {
-            let re = params.center.re + (x as f64 / params.size[0] as f64 - 0.5) * params.zoom;
-            let im = params.center.im + (y as f64 / params.size[1] as f64 - 0.5) * view_height;
-            let c = Complex64::new(re, im);
-            calculate_iterations_standard(c)
-        };
+        let re_offset = (Double::from(x as f64) / Double::from(params.size[0] as f64) - Double::from(0.5)) * zoom_dd;
+        let im_offset = (Double::from(y as f64) / Double::from(params.size[1] as f64) - Double::from(0.5)) * view_height_dd;
+        
+        let c = ComplexDouble::new(params.center.re + re_offset, params.center.im + im_offset);
+        let n = calculate_iterations_high_precision(c);
+        
         *pixel = smooth_color(n, MAX_ITERATIONS);
     });
     image
 }
 
 
+
 fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
 
-fn screen_to_complex(pos: Pos2, center: Complex64, zoom: f64, screen_rect: Rect) -> Complex64 {
+fn screen_to_complex_double(pos: Pos2, center: ComplexDouble, zoom: f64, screen_rect: Rect) -> ComplexDouble {
     let screen_size = screen_rect.size();
     let aspect_ratio = screen_size.x / screen_size.y;
-    let re = center.re + ((pos.x - screen_rect.min.x) as f64 / screen_size.x as f64 - 0.5) * zoom;
-    let im = center.im + ((pos.y - screen_rect.min.y) as f64 / screen_size.y as f64 - 0.5) * (zoom / aspect_ratio as f64);
-    Complex64::new(re, im)
+    let zoom_dd: Double = zoom.into();
+
+    let re_offset = (Double::from((pos.x - screen_rect.min.x) as f64) / Double::from(screen_size.x as f64) - Double::from(0.5)) * zoom_dd;
+    let im_offset = (Double::from((pos.y - screen_rect.min.y) as f64) / Double::from(screen_size.y as f64) - Double::from(0.5)) * zoom_dd * Double::from(1.0 / aspect_ratio as f64);
+    
+    ComplexDouble::new(center.re + re_offset, center.im + im_offset)
 }
 
-fn calculate_iterations_standard(c: Complex64) -> f64 {
-    let mut z = Complex64::new(0.0, 0.0);
+fn calculate_iterations_high_precision(c: ComplexDouble) -> f64 {
+    let mut z = ComplexDouble::default();
     for i in 0..MAX_ITERATIONS {
-        if z.norm_sqr() > ESCAPE_RADIUS_SQ {
-            return i as f64 - (z.norm().log2().log2()) + 4.0;
+        let norm_sq = z.norm_sqr();
+        if norm_sq.hi > ESCAPE_RADIUS_SQ.hi {
+            // Use the high part for the smooth coloring calculation
+            return i as f64 - (norm_sq.hi.sqrt().log2().log2()) + 4.0;
         }
-        z = z * z + c;
+        z = z.sqr() + c;
     }
-    MAX_ITERATIONS as f64
-}
-
-fn calculate_iterations_perturbed(
-    delta_c: &Complex64,
-    ref_orbit: &[Complex64],
-    c: Complex64,
-) -> f64 {
-    let mut delta_z = Complex64::new(0.0, 0.0);
-    let mut z = Complex64::new(0.0, 0.0);
-    let mut start_iter = 0;
-
-    // Part 1: Perturbation Loop, as long as we have reference data
-    for i in 0..ref_orbit.len() {
-        let z_ref = ref_orbit[i];
-        z = z_ref + delta_z;
-
-        if z.norm_sqr() > ESCAPE_RADIUS_SQ {
-            return i as f64 - (z.norm().log2().log2()) + 4.0;
-        }
-
-        // Rebase condition: If the delta grows too large, the approximation becomes
-        // unstable. We must switch to the standard algorithm.
-        if z.norm() < delta_z.norm() {
-            start_iter = i + 1;
-            break; 
-        }
-
-        delta_z = 2.0 * z_ref * delta_z + delta_z.powi(2) + delta_c;
-        start_iter = i + 1;
-    }
-
-    // Part 2: Standard Iteration Fallback
-    // This continues the calculation from where the perturbation loop left off.
-    for i in start_iter..(MAX_ITERATIONS as usize) {
-        if z.norm_sqr() > ESCAPE_RADIUS_SQ {
-            return i as f64 - (z.norm().log2().log2()) + 4.0;
-        }
-        z = z * z + c;
-    }
-
     MAX_ITERATIONS as f64
 }
 
