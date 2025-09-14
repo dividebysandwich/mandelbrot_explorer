@@ -298,7 +298,7 @@ impl eframe::App for MandelbrotApp {
                 if response.hovered() {
                     let scroll = ui.input(|i| i.raw_scroll_delta);
                     if scroll.y != 0.0 {
-                        let zoom_factor = (scroll.y as f64 * 0.001).exp();
+                        let zoom_factor = (scroll.y as f64 * 0.01).exp();
                         if let Some(hover_pos) = response.hover_pos() {
                             let complex_pos = screen_to_complex_double(hover_pos, self.target_center, self.target_zoom, panel_rect);
                             let center_diff_re = self.target_center.re - complex_pos.re;
