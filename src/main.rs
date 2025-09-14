@@ -38,7 +38,7 @@ struct CalculationParams {
     center: Complex64,
     zoom: f64,
     size: [usize; 2],
-    _reference_c: Complex64,
+    reference_c: Complex64,
     reference_orbit: Vec<Complex64>,
 }
 
@@ -82,6 +82,10 @@ impl MandelbrotApp {
         for _ in 0..MAX_ITERATIONS {
             reference_orbit.push(z);
             z = z * z + reference_c;
+            // Stop if the reference point escapes, creating a stable `MaxRefIteration`.
+            if z.norm_sqr() > ESCAPE_RADIUS_SQ * 100.0 {
+                break;
+            }
         }
 
         let params = CalculationParams {
@@ -91,7 +95,7 @@ impl MandelbrotApp {
                 self.viewport_size.x as usize,
                 self.viewport_size.y as usize,
             ],
-            _reference_c: reference_c,
+            reference_c,
             reference_orbit,
         };
 
@@ -135,7 +139,7 @@ impl eframe::App for MandelbrotApp {
                 self.viewport_size = panel_rect.size();
                 self.target_center = self.display_center;
                 self.target_zoom = self.display_zoom;
-                self.is_calculating = false; 
+                self.is_calculating = false;
                 // A new calculation will be triggered by the check at the end of this function.
             }
 
@@ -207,7 +211,7 @@ impl eframe::App for MandelbrotApp {
             ctx.request_repaint();
         });
 
-        // Side panel remains the same...
+        // Side panel with basic controls and info
         egui::SidePanel::left("info_panel").show(ctx, |ui| {
             ui.heading("Mandelbrot Explorer");
             ui.separator();
@@ -250,7 +254,8 @@ fn render_mandelbrot_to_new_image(params: CalculationParams) -> ColorImage {
             let offset_re = (x as f64 / params.size[0] as f64 - 0.5) * params.zoom;
             let offset_im = (y as f64 / params.size[1] as f64 - 0.5) * view_height;
             let delta = Complex64::new(offset_re, offset_im);
-            calculate_iterations_perturbed(&delta, &params.reference_orbit)
+            let c = params.reference_c + delta;
+            calculate_iterations_perturbed(&delta, &params.reference_orbit, c)
         } else {
             let re = params.center.re + (x as f64 / params.size[0] as f64 - 0.5) * params.zoom;
             let im = params.center.im + (y as f64 / params.size[1] as f64 - 0.5) * view_height;
@@ -284,19 +289,44 @@ fn calculate_iterations_standard(c: Complex64) -> f64 {
     MAX_ITERATIONS as f64
 }
 
-fn calculate_iterations_perturbed(delta_c: &Complex64, ref_orbit: &[Complex64]) -> f64 {
+fn calculate_iterations_perturbed(
+    delta_c: &Complex64,
+    ref_orbit: &[Complex64],
+    c: Complex64,
+) -> f64 {
     let mut delta_z = Complex64::new(0.0, 0.0);
-    for i in 0..MAX_ITERATIONS {
-        let z_ref = ref_orbit[i as usize];
-        if z_ref.is_nan() || z_ref.is_infinite() {
-            return i as f64;
-        }
-        let z = z_ref + delta_z;
+    let mut z = Complex64::new(0.0, 0.0);
+    let mut start_iter = 0;
+
+    // Part 1: Perturbation Loop, as long as we have reference data
+    for i in 0..ref_orbit.len() {
+        let z_ref = ref_orbit[i];
+        z = z_ref + delta_z;
+
         if z.norm_sqr() > ESCAPE_RADIUS_SQ {
             return i as f64 - (z.norm().log2().log2()) + 4.0;
         }
+
+        // Rebase condition: If the delta grows too large, the approximation becomes
+        // unstable. We must switch to the standard algorithm.
+        if z.norm() < delta_z.norm() {
+            start_iter = i + 1;
+            break; 
+        }
+
         delta_z = 2.0 * z_ref * delta_z + delta_z.powi(2) + delta_c;
+        start_iter = i + 1;
     }
+
+    // Part 2: Standard Iteration Fallback
+    // This continues the calculation from where the perturbation loop left off.
+    for i in start_iter..(MAX_ITERATIONS as usize) {
+        if z.norm_sqr() > ESCAPE_RADIUS_SQ {
+            return i as f64 - (z.norm().log2().log2()) + 4.0;
+        }
+        z = z * z + c;
+    }
+
     MAX_ITERATIONS as f64
 }
 
