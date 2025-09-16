@@ -415,9 +415,9 @@ fn smooth_color(n: f64, max_iter: u32) -> Color32 {
         return Color32::BLACK;
     }
     let hue = (n / 30.0).fract() as f32;
-    let saturation = 0.8;
-    let value = (n / max_iter as f64).sqrt() as f32;
-    Hsva::new(hue, saturation, value.clamp(0.1, 1.0), 1.0).into()
+    let saturation = 1.0;
+    let value = 0.6 + 0.4 * (n / max_iter as f64) as f32;
+    Hsva::new(hue, saturation, value.clamp(0.2, 1.0), 1.0).into()
 }
 
 #[cfg(target_arch = "wasm32")]
