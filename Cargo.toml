@@ -5,6 +5,7 @@ edition = "2024"
 
 # Common dependencies, used by both native and web.
 [dependencies]
+astro-float = { version = "0.9.5", default-features = false, features = ["std"] }
 egui = "0.34.3"
 egui-wgpu = "0.34.3"
 log = "0.4.32"
