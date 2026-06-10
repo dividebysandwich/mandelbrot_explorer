@@ -230,7 +230,8 @@ impl MandelbrotApp {
 }
 
 impl eframe::App for MandelbrotApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // Check for and integrate newly calculated image
         if let Ok(mut guard) = self.new_image_and_params.try_lock() {
             if let Some((new_image, center, zoom)) = guard.take() {
@@ -253,7 +254,33 @@ impl eframe::App for MandelbrotApp {
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // Side panel with basic controls and info
+        egui::Panel::left("info_panel").show_inside(ui, |ui| {
+            ui.heading("Mandelbrot Explorer");
+            ui.separator();
+            ui.label("Controls:");
+            ui.label(" - Zoom: Mouse Wheel");
+            ui.label(" - Pan: Click & Drag");
+            ui.separator();
+            ui.label("Current View:");
+            ui.monospace(format!("Center Re: {:.16}", self.target_center.re.hi));
+            ui.monospace(format!("Center Im: {:.16}", self.target_center.im.hi));
+            ui.monospace(format!("Zoom: {:.2e}", self.target_zoom));
+            ui.separator();
+            ui.label(format!("Max Iterations: {}", MAX_ITERATIONS));
+             if ui.button("Reset View").clicked() {
+                let initial_center = ComplexDouble::new((-0.75).into(), 0.0.into());
+                let initial_zoom = 4.0;
+                self.target_center = initial_center;
+                self.target_zoom = initial_zoom;
+                self.display_center = initial_center;
+                self.display_zoom = initial_zoom;
+                self.is_calculating = false;
+                self.start_calculation();
+            }
+        });
+
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             let panel_rect = ui.available_rect_before_wrap();
 
             // Resize Logic
@@ -296,7 +323,7 @@ impl eframe::App for MandelbrotApp {
                 }
 
                 if response.hovered() {
-                    let scroll = ui.input(|i| i.raw_scroll_delta);
+                    let scroll = ui.input(|i| i.smooth_scroll_delta);
                     if scroll.y != 0.0 {
                         let zoom_factor = (scroll.y as f64 * 0.01).exp();
                         if let Some(hover_pos) = response.hover_pos() {
@@ -327,32 +354,6 @@ impl eframe::App for MandelbrotApp {
             }
 
             ctx.request_repaint();
-        });
-
-        // Side panel with basic controls and info
-        egui::SidePanel::left("info_panel").show(ctx, |ui| {
-            ui.heading("Mandelbrot Explorer");
-            ui.separator();
-            ui.label("Controls:");
-            ui.label(" - Zoom: Mouse Wheel");
-            ui.label(" - Pan: Click & Drag");
-            ui.separator();
-            ui.label("Current View:");
-            ui.monospace(format!("Center Re: {:.16}", self.target_center.re.hi));
-            ui.monospace(format!("Center Im: {:.16}", self.target_center.im.hi));
-            ui.monospace(format!("Zoom: {:.2e}", self.target_zoom));
-            ui.separator();
-            ui.label(format!("Max Iterations: {}", MAX_ITERATIONS));
-             if ui.button("Reset View").clicked() {
-                let initial_center = ComplexDouble::new((-0.75).into(), 0.0.into());
-                let initial_zoom = 4.0;
-                self.target_center = initial_center;
-                self.target_zoom = initial_zoom;
-                self.display_center = initial_center;
-                self.display_zoom = initial_zoom;
-                self.is_calculating = false;
-                self.start_calculation();
-            }
         });
     }
 }
